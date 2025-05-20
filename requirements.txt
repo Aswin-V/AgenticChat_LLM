@@ -1,0 +1,9 @@
+# --- requirements.txt ---
+# List of packages to install in your virtual environment
+#For ui
+gradio
+
+langchain
+langchain-google-genai
+python-dotenv
+Pillow

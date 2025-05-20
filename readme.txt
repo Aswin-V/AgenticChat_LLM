@@ -1,4 +1,3 @@
-# AgenticChat_LLM
 1.  Set up Python Virtual Environment (venv):
     *   Open your terminal in the directory where you want to create the app files.
     *   Create a virtual environment: `python -m venv venv`
