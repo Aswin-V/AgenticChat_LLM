@@ -1,31 +1,32 @@
+# app.py
+# This is the main application file for the Agentic Chat LLM interface.
+# It handles the core logic for processing user input (text and files),
+# interacting with the LLM handler, and managing the chat history.
+
 import gradio as gr
-from PIL import Image, UnidentifiedImageError # Keep UnidentifiedImageError
 import os
 from typing import List, Tuple, Optional
 from typing import AsyncGenerator, Any # Import AsyncGenerator
+from config import (
+    DEFAULT_LLM_PROVIDER, DEFAULT_MODEL, AVAILABLE_MODELS, # LLM Config
+    DEFAULT_PROMPT_IMAGE, DEFAULT_PROMPT_AUDIO, DEFAULT_PROMPT_VIDEO, DEFAULT_PROMPT_FILE # Default Prompts
+)
 
 from llm_handler import LLMHandler
 from utils import (
-    get_image_mime_type, get_audio_mime_type, get_video_mime_type,
-    encode_file_to_base64, get_default_prompt_for_media
+    process_uploaded_file, # Import the moved function
 )
 
-# --- Configuration ---
-# You can change the default LLM provider and model here
-DEFAULT_LLM_PROVIDER = "google" 
-# Use "gemini-pro" for text-only, "gemini-pro-vision" for text+image
-DEFAULT_MODEL = "gemini-1.5-flash" 
-AVAILABLE_MODELS = [
-    DEFAULT_MODEL,
-    "gemini-1.5-pro",
-    "gemini-2.5-flash-preview-04-17"  # Assuming this is a valid model name
-]
-
 # Initialize LLM Handler
+# This instance will be shared across the application.
 llm_handler_instance: Optional[LLMHandler] = None
 
-# Make the LLM choice dynamic via UI elements
 def initialize_llm_handler(model_name: str) -> Optional[LLMHandler]:
+    """
+    Initializes or re-initializes the global LLMHandler instance
+    with the specified model name. This is called at startup and
+    when the user changes the model via the UI dropdown.
+    """
     global llm_handler_instance
     try:
         llm_handler_instance = LLMHandler(provider=DEFAULT_LLM_PROVIDER, model_name=model_name)
@@ -34,58 +35,82 @@ def initialize_llm_handler(model_name: str) -> Optional[LLMHandler]:
         print(f"Error initializing LLMHandler: {e}")
         return None
 
-# --- File Processing Logic ---
-def process_uploaded_file(file_path: str, file_name: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
+# --- Input Processing Helper ---
+def _prepare_inputs_for_llm(
+    user_message: str,
+    # Gradio File component output. It's a temporary file object
+    # created by Gradio when a file is uploaded. Its 'name' attribute
+    # holds the path to the temporary file.
+    # It's Optional because the user might not upload a file.
+    file_obj: Optional[gr.File]
+) -> Tuple[
+    str,  # text_for_llm
+    str,  # display_prompt (what user sees in history)
+    Optional[str], Optional[str],  # image_data, image_mime
+    Optional[str], Optional[str],  # audio_data, audio_mime
+    Optional[str], Optional[str],  # video_data, video_mime
+    bool  # has_processed_media (true if image/audio/video successfully processed)
+]:
     """
-    Processes an uploaded file to determine its type, MIME type,
-    and base64 encode it if it's a supported media type.
-    Returns: (base64_data, mime_type, media_category ("image", "audio", "video", "file"), info_message)
+    Processes user message and an optional file upload to prepare inputs for the LLM
+    and the chat display.
     """
-    base64_data: Optional[str] = None
-    mime_type: Optional[str] = None
-    media_category: Optional[str] = None
-    info_message: str = ""
+    # Initialize media data variables
+    # These will hold base64 encoded data and MIME types for supported media.
+    base64_image_data: Optional[str] = None
+    # MIME type (e.g., "image/jpeg", "audio/wav")
+    image_mime_type: Optional[str] = None
+    base64_audio_data: Optional[str] = None
+    audio_mime_type: Optional[str] = None
+    base64_video_data: Optional[str] = None
+    video_mime_type: Optional[str] = None
+    file_processing_info_message: str = ""
+    has_processed_media: bool = False
 
-    # Try to process as an image first
-    image_mime = get_image_mime_type(file_path)
-    if image_mime and image_mime != "application/octet-stream":
-        base64_data = encode_file_to_base64(file_path)
-        if base64_data:
-            mime_type = image_mime
-            media_category = "image"
-            info_message = f"[Image '{file_name}' uploaded]"
-        else:
-            info_message = f"[Error processing image file '{file_name}']"
-    else:
-        # If not a recognized image by PIL, check for audio/video by extension
-        file_ext = os.path.splitext(file_name)[1].lower()
-        if file_ext in ['.wav', '.mp3', '.ogg', '.flac']:
-            mime_type = get_audio_mime_type(file_name)
-            base64_data = encode_file_to_base64(file_path)
-            if base64_data:
-                media_category = "audio"
-                info_message = f"[Audio file '{file_name}' uploaded]"
-            else:
-                info_message = f"[Error processing audio file '{file_name}']"
-        elif file_ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
-            mime_type = get_video_mime_type(file_name)
-            base64_data = encode_file_to_base64(file_path)
-            if base64_data:
-                media_category = "video"
-                info_message = f"[Video file '{file_name}' uploaded]"
-            else:
-                info_message = f"[Error processing video file '{file_name}']"
-        else:
-            media_category = "file"
-            info_message = f"[File '{file_name}' uploaded. Type not fully supported for direct processing.]"
+    # The `process_uploaded_file` function (from utils.py) handles reading
+    # the file, base64 encoding, and determining its type and info message.
 
-    # If base64_data is None after attempting to process as media, ensure mime_type is also None
-    if not base64_data:
-        mime_type = None
-        # media_category might still be "audio" or "video" if encoding failed,
-        # but it won't be passed to LLM if base64_data is None.
+    # Process uploaded file if any
+    if file_obj is not None:
+        temp_file_path = file_obj.name
+        file_name = os.path.basename(temp_file_path)
+        b64_data, mime, category, info_msg = process_uploaded_file(temp_file_path, file_name)
+        file_processing_info_message = info_msg
 
-    return base64_data, mime_type, media_category, info_message
+        if category == "image" and b64_data and mime:
+            base64_image_data, image_mime_type = b64_data, mime
+            has_processed_media = True
+        elif category == "audio" and b64_data and mime:
+            base64_audio_data, audio_mime_type = b64_data, mime
+            has_processed_media = True
+        elif category == "video" and b64_data and mime:
+            base64_video_data, video_mime_type = b64_data, mime
+            has_processed_media = True
+
+    # Determine the text for LLM and the prompt to display to the user
+    # text_for_llm is the actual text query sent to the LLM.
+    # display_prompt is what the user sees as their message in the chat history.
+    text_for_llm = user_message
+    display_prompt = user_message
+
+    if file_processing_info_message: # If any file was processed (even if not media for LLM)
+        # Prepend file processing info to the user's message in the display history.
+        # This shows the user that their file was received and processed.
+        display_prompt = f"{file_processing_info_message}\n\n{user_message}" if user_message else file_processing_info_message
+
+    if has_processed_media and not user_message:
+        # If there's media but no specific user text, use a default prompt for that media type
+        if base64_image_data: text_for_llm = DEFAULT_PROMPT_IMAGE
+        elif base64_audio_data: text_for_llm = DEFAULT_PROMPT_AUDIO
+        elif base64_video_data: text_for_llm = DEFAULT_PROMPT_VIDEO
+
+    return (
+        text_for_llm, display_prompt,
+        base64_image_data, image_mime_type,
+        base64_audio_data, audio_mime_type,
+        base64_video_data, video_mime_type,
+        has_processed_media
+    )
 
 
 # --- Gradio Interface Logic ---
@@ -95,6 +120,13 @@ async def chat_fn(
     chat_history: List[dict[str, Optional[str]]],
     model_name: str  # Add model_name as input
 ) -> AsyncGenerator[Tuple[str, Optional[gr.File], List[dict[str, Optional[str]]], List[dict[str, Optional[str]]]], None]:
+    # This function is an asynchronous generator because Gradio expects
+    # generators for streaming updates to the UI (e.g., clearing inputs,
+    # updating chat history).
+    # It yields tuples: (updated_text_input, updated_file_upload,
+    # updated_chatbot_display, updated_chat_history_state).
+    # The last two elements are the same list, used to update both the
+    # visual chatbot and the internal state.
     """
     Handles the chat interaction.
     Processes user input (text and/or file), calls the LLM, and updates history.
@@ -106,69 +138,40 @@ async def chat_fn(
         yield "", None, updated_history, updated_history
         return
 
-    # Initialize media data variables
-    file_info_message: str = ""
-    base64_image_data: Optional[str] = None
-    image_mime_type: Optional[str] = None
-    base64_audio_data: Optional[str] = None
-    audio_mime_type: Optional[str] = None
-    base64_video_data: Optional[str] = None
-    video_mime_type: Optional[str] = None
+    # Prepare inputs from user message and file
+    (
+        text_for_llm, display_prompt,
+        base64_image_data, image_mime_type,
+        base64_audio_data, audio_mime_type,
+        base64_video_data, video_mime_type,
+        has_processed_media
+    ) = _prepare_inputs_for_llm(user_message, file_obj)
 
-    # Process uploaded file if any
-    if file_obj is not None:
-        temp_file_path = file_obj.name
-        file_name = os.path.basename(temp_file_path)
-        b64_data, mime, category, info_msg = process_uploaded_file(temp_file_path, file_name)
-        file_info_message = info_msg
-
-        if category == "image" and b64_data and mime:
-            base64_image_data, image_mime_type = b64_data, mime
-        elif category == "audio" and b64_data and mime:
-            base64_audio_data, audio_mime_type = b64_data, mime
-        elif category == "video" and b64_data and mime:
-            base64_video_data, video_mime_type = b64_data, mime
-
-    # Determine the full user prompt and text for LLM
-    full_user_prompt = user_message
-    text_for_llm = user_message
-    media_processed = False
-
-    if base64_image_data and image_mime_type:
-        media_processed = True
-        full_user_prompt = f"{file_info_message}\n\n{user_message}" if user_message else file_info_message
-        if not user_message: text_for_llm = get_default_prompt_for_media("image")
-    elif base64_audio_data and audio_mime_type:
-        media_processed = True
-        full_user_prompt = f"{file_info_message}\n\n{user_message}" if user_message else file_info_message
-        if not user_message: text_for_llm = get_default_prompt_for_media("audio")
-    elif base64_video_data and video_mime_type:
-        media_processed = True
-        full_user_prompt = f"{file_info_message}\n\n{user_message}" if user_message else file_info_message
-        if not user_message: text_for_llm = get_default_prompt_for_media("video")
-    elif file_info_message: # Other file types or processing errors
-        full_user_prompt = f"{file_info_message}\n\n{user_message}" if user_message else file_info_message
-
-    # Handle case with no user message and no processable file
-    if not user_message and not media_processed and not file_info_message: # If truly no input at all
+    # Handle cases of no actual input for the LLM or display
+    # display_prompt will be empty if user_message is empty AND no file was uploaded/processed
+    if not display_prompt:
+        # If there's no text message and no file was uploaded/processed
+        # (or the file processing yielded an empty info message, which shouldn't happen
+        # for any file), then there's no input to process or display.
+        # Provide a message asking for input.
         if not chat_history:
-            updated_history = chat_history + [{"role": "assistant", "content": "Please type a message or upload a file."}]
-            yield "", None, updated_history, updated_history
+            error_message = "Please type a message or upload a file."
         else:
-            updated_history = chat_history + [{"role": "assistant", "content": "Please provide new input or ask a question."}]
-            yield "", None, updated_history, updated_history
+            error_message = "Please provide new input or ask a question."
+        # Do not add user message to history if it's empty
+        chat_history.append({"role": "assistant", "content": error_message})
+        yield "", None, chat_history, chat_history
         return
-    elif not user_message and not media_processed and file_info_message: # File uploaded but not processable media, and no text
-        # Let the file_info_message be the prompt
-        text_for_llm = "" # No specific user text, LLM will see file_info_message in history
-        # full_user_prompt is already set to file_info_message
 
     # Append user's turn to chat history for display
-    chat_history.append({"role": "user", "content": full_user_prompt})
+    # display_prompt contains the file info message (if any) and the user's text.
+    chat_history.append({"role": "user", "content": display_prompt})
     yield "", None, chat_history, chat_history # Update UI with user's message
 
+    # The actual call to the LLM handler happens here.
+    # It's only called if there's user text or successfully processed media.
     # Call LLM if there's something to process
-    if text_for_llm or base64_image_data or base64_audio_data or base64_video_data:
+    if text_for_llm or has_processed_media:
         ai_response = await llm_handler_instance.generate_response(
             user_text=text_for_llm,
             base64_image_data=base64_image_data,
@@ -181,91 +184,36 @@ async def chat_fn(
         )
         chat_history.append({"role": "assistant", "content": ai_response})
     else:
-        # This case should ideally be caught by earlier checks,
-        # but as a fallback if only a non-processable file_info_message was shown.
-        if not chat_history[-1].get("content"): # If user prompt was empty
-             chat_history[-1]["content"] = "..." # Placeholder if user prompt was truly empty
+        # This else block should ideally not be reached if the initial `if not display_prompt:`
+        # check works correctly. However, it serves as a fallback.
+        # It might be reached if a file was uploaded, `file_processing_info_message` was set,
+        # but `has_processed_media` is False (e.g., PDF) AND `user_message` is empty.
         chat_history.append({"role": "assistant", "content": "I received the file information. How can I help you with it?"})
 
     yield "", None, chat_history, chat_history # Update UI with AI's response
 
-# --- Gradio UI Definition ---
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
-    gr.Markdown(f"""
-    # Agentic Chat Application
-    Powered by Langchain and Google Generative AI ({DEFAULT_MODEL}).
-    Type your message, or upload an image, audio, or video file.
-    """)
 
-    # Model selection dropdown
-    model_selection = gr.Dropdown(
-        choices=AVAILABLE_MODELS,
-        value=DEFAULT_MODEL,
-        label="Select Model",
-    )
-
-    # Initialize LLM handler with the default model
-    # This will be called once when the script starts
-    if llm_handler_instance is None: # Ensure it's only initialized once at startup if not already
-        llm_handler_instance = initialize_llm_handler(model_selection.value)
-
-    # Update LLM handler when the model selection changes
-    model_selection.change(initialize_llm_handler, inputs=[model_selection], outputs=None) # No direct output to a component
-
-    # Chatbot display
-    chatbot_display = gr.Chatbot(
-        label="Chat Window",
-        height=600,
-        type="messages", # Use new message format
-        avatar_images=(None, "https://www.google.com/images/branding/googlelogo/1x/googlelogo_color_272x92dp.png") # (user, AI)
-    )
-    
-    # State to store chat history in Gradio's format
-    chat_history_state = gr.State([]) 
-
-    with gr.Row():
-        text_input = gr.Textbox(
-            label="Your Message",
-            placeholder="Type your message here, or upload a file and ask about it...",
-            scale=3,
-            autofocus=True,
-        )
-        file_upload = gr.File(
-            label="Upload File (Image, Audio, Video, etc.)",
-            # More generic file types, specific handling is done in process_uploaded_file
-            file_types=["image", "audio", "video", ".pdf", ".txt", ".json", ".csv"],
-            scale=1,
-        )
-
-    submit_button = gr.Button("Send", variant="primary")
-
-    # Event handling for chat submission
-    submit_event_params = {
-        "fn": chat_fn,
-        "inputs": [text_input, file_upload, chat_history_state, model_selection],
-        "outputs": [text_input, file_upload, chatbot_display, chat_history_state],
-        "show_progress": "full"
-    }
-    submit_button.click(**submit_event_params)
-    text_input.submit(**submit_event_params)
-
-    # Clear chat button
-    def clear_chat_history_fn():
-        return [], [], None, [] # text_input, file_upload, chatbot_display, chat_history_state
-
-    clear_button = gr.Button("Clear Chat")
-    clear_button.click(
-        fn=clear_chat_history_fn,
-        inputs=[],
-        outputs=[text_input, file_upload, chatbot_display, chat_history_state],
-        queue=False 
-    )
-
-    # Display error if LLM handler failed to initialize
-    if llm_handler_instance is None:
-        gr.Error("LLM Handler could not be initialized. This is likely due to a missing or invalid GOOGLE_API_KEY in your .env file. Please check the console for more details and set up the API key.")
-
-
+# --- Main Application Execution ---
 if __name__ == "__main__":
-    demo.queue() 
-    demo.launch(debug=True)
+    # Import UI creation function here to avoid circular imports at module load time
+    # and to ensure app.py's globals are defined before ui.py tries to import them.
+    # This ensures that `llm_handler_instance` is potentially initialized
+    # before the UI is built, allowing the UI to display an error if initialization fails.
+    from ui import create_gradio_ui
+
+    # Ensure LLM is initialized with the default model before UI creation.
+    # This is crucial because ui.py will check llm_handler_instance status
+    # to display an error message if initialization failed.
+    if llm_handler_instance is None:
+        # Attempt to initialize the LLM handler with the default model.
+        initialize_llm_handler(DEFAULT_MODEL) # Attempt to initialize with the default model
+        if llm_handler_instance is None:
+            # This print is for the console; the UI will show a gr.Error based on
+            # the llm_handler_instance state when create_gradio_ui() is called.
+            # This indicates a critical failure, likely due to a missing API key.
+            print("CRITICAL: LLM Handler failed to initialize at startup. Check API key and configurations.")
+
+    # Create and launch the Gradio UI
+    demo_instance = create_gradio_ui()
+    demo_instance.queue() 
+    demo_instance.launch(debug=True)
