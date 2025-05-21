@@ -8,13 +8,15 @@ DEFAULT_LLM_PROVIDER: str = "google"
 
 # Default model name. Choose a model that supports multimodal input if needed.
 # Available models depend on the provider and your API key/permissions.
-DEFAULT_MODEL: str = "gemini-2.0-flash"
+DEFAULT_MODEL: str = "gemini-1.5-flash"
 #https://console.cloud.google.com/vertex-ai/publishers/google/model-garden/gemini-2.5-flash-preview-05-20?inv=1&invt=Abx8Bg
 AVAILABLE_MODELS: List[str] = [
     DEFAULT_MODEL,
     "gemini-2.0-flash-lite",
     "gemini-2.0-flash",
+    "gemini-1.5-pro",
     #"gemini-2.5-pro-preview-05-06", #Does not have free quota tier
+    "gemini-2.5-flash-preview-04-17",
     "gemini-2.5-flash-preview-05-20"  # Example: Assuming this is a valid model name
 ]
 
