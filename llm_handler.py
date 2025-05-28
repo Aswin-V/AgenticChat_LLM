@@ -40,19 +40,29 @@ class LLMHandler:
         else:
             raise ValueError(f"Unsupported LLM provider: {self.provider}")
 
-    def _format_chat_history_for_llm(self, chat_history: List[Dict[str, Optional[str]]]) -> List[Any]:
+    def _format_chat_history_for_llm(self, chat_history: List[Dict[str, Any]]) -> List[Any]:
         """
         Converts Gradio's dictionary-based chat history format to Langchain's message objects.
+        Handles cases where content might be a string or a tuple (text, filepath) for UI display.
         """
         messages = []
         for msg_dict in chat_history:
             role = msg_dict.get("role")
             content = msg_dict.get("content")
-            if content: # Ensure content is not None or empty
+            
+            actual_text_content: Optional[str] = None
+            if isinstance(content, tuple): # User message with image: (text, filepath)
+                actual_text_content = content[0] if content[0] else "" # Use text part
+            elif isinstance(content, str): # Regular text message or assistant message
+                actual_text_content = content
+
+            # Ensure actual_text_content is not None before creating a message.
+            # An empty string is valid content for an LLM message.
+            if actual_text_content is not None:
                 if role == "user":
-                    messages.append(HumanMessage(content=content))
+                    messages.append(HumanMessage(content=actual_text_content))
                 elif role == "assistant":
-                    messages.append(AIMessage(content=content))
+                    messages.append(AIMessage(content=actual_text_content))
                 # System messages could be handled here too if needed
         return messages
 
@@ -78,24 +88,30 @@ class LLMHandler:
         # Add image part if present
         if base64_image_data and image_mime_type and self.provider == "google":
             data_uri = f"data:{image_mime_type};base64,{base64_image_data}"
+            # Correct format for images as per Langchain documentation for Google GenAI
             current_input_content.append({"type": "image_url", "image_url": data_uri})
         elif base64_image_data: # Fallback if MIME type is missing or for other providers
             current_input_content.append({"type": "text", "text": "[Image uploaded, but current LLM may not process it directly]"})
 
         # Add audio part if present
         if base64_audio_data and audio_mime_type and self.provider == "google":
-            data_uri = f"data:{audio_mime_type};base64,{base64_audio_data}"
-            # Note: "audio_url" type is an assumption. Verify with Langchain/Google documentation
-            # if a different type or structure is needed for audio data URIs.
-            current_input_content.append({"type": "audio_url", "audio_url": data_uri}) # Assuming 'audio_url' or similar type
+            # Correct format for audio as per Langchain documentation for Google GenAI
+            current_input_content.append({
+                "type": "media",
+                "data": base64_audio_data,
+                "mime_type": audio_mime_type
+            })
         elif base64_audio_data:
             current_input_content.append({"type": "text", "text": "[Audio uploaded, but current LLM may not process it directly]"})
 
         # Add video part if present
         if base64_video_data and video_mime_type and self.provider == "google":
-            data_uri = f"data:{video_mime_type};base64,{base64_video_data}"
-            # Note: "video_url" type is an assumption.
-            current_input_content.append({"type": "video_url", "video_url": data_uri}) # Assuming 'video_url' or similar type
+            # Correct format for video as per Langchain documentation for Google GenAI
+            current_input_content.append({
+                "type": "media",
+                "data": base64_video_data,
+                "mime_type": video_mime_type
+            })
         elif base64_video_data:
             current_input_content.append({"type": "text", "text": "[Video uploaded, but current LLM may not process it directly]"})
 
