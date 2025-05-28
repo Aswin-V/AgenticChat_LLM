@@ -21,7 +21,7 @@ from utils import (
 # This instance will be shared across the application.
 llm_handler_instance: Optional[LLMHandler] = None
 
-def initialize_llm_handler(model_name: str) -> Optional[LLMHandler]:
+def initialize_llm_handler(model_name: str) -> None:
     """
     Initializes or re-initializes the global LLMHandler instance
     with the specified model name. This is called at startup and
@@ -30,10 +30,10 @@ def initialize_llm_handler(model_name: str) -> Optional[LLMHandler]:
     global llm_handler_instance
     try:
         llm_handler_instance = LLMHandler(provider=DEFAULT_LLM_PROVIDER, model_name=model_name)
-        return llm_handler_instance
+        # No return needed as it modifies a global instance and Gradio output is None
     except ValueError as e:
         print(f"Error initializing LLMHandler: {e}")
-        return None
+        # No return needed
 
 # --- Input Processing Helper ---
 def _prepare_inputs_for_llm(
@@ -49,7 +49,9 @@ def _prepare_inputs_for_llm(
     Optional[str], Optional[str],  # image_data, image_mime
     Optional[str], Optional[str],  # audio_data, audio_mime
     Optional[str], Optional[str],  # video_data, video_mime
-    bool  # has_processed_media (true if image/audio/video successfully processed)
+    bool,  # has_processed_media (true if image/audio/video successfully processed for LLM)
+    Optional[str], # media_category ("image", "audio", "video", "file", None)
+    Optional[str]  # original_file_path (for UI display)
 ]:
     """
     Processes user message and an optional file upload to prepare inputs for the LLM
@@ -66,6 +68,8 @@ def _prepare_inputs_for_llm(
     video_mime_type: Optional[str] = None
     file_processing_info_message: str = ""
     has_processed_media: bool = False
+    processed_media_category: Optional[str] = None
+    original_file_path_for_ui: Optional[str] = None
 
     # The `process_uploaded_file` function (from utils.py) handles reading
     # the file, base64 encoding, and determining its type and info message.
@@ -73,17 +77,20 @@ def _prepare_inputs_for_llm(
     # Process uploaded file if any
     if file_obj is not None:
         temp_file_path = file_obj.name
+        original_file_path_for_ui = temp_file_path # Store for UI display
         file_name = os.path.basename(temp_file_path)
-        b64_data, mime, category, info_msg = process_uploaded_file(temp_file_path, file_name)
+        # process_uploaded_file returns: b64_data, mime, category, info_msg
+        b64_data, mime, category_from_util, info_msg = process_uploaded_file(temp_file_path, file_name)
         file_processing_info_message = info_msg
+        processed_media_category = category_from_util # Store the category
 
-        if category == "image" and b64_data and mime:
+        if category_from_util == "image" and b64_data and mime:
             base64_image_data, image_mime_type = b64_data, mime
             has_processed_media = True
-        elif category == "audio" and b64_data and mime:
+        elif category_from_util == "audio" and b64_data and mime:
             base64_audio_data, audio_mime_type = b64_data, mime
             has_processed_media = True
-        elif category == "video" and b64_data and mime:
+        elif category_from_util == "video" and b64_data and mime:
             base64_video_data, video_mime_type = b64_data, mime
             has_processed_media = True
 
@@ -109,9 +116,43 @@ def _prepare_inputs_for_llm(
         base64_image_data, image_mime_type,
         base64_audio_data, audio_mime_type,
         base64_video_data, video_mime_type,
-        has_processed_media
+        has_processed_media,
+        processed_media_category,
+        original_file_path_for_ui
     )
 
+
+# --- UI Helper for Immediate File Preview ---
+def handle_file_upload_for_preview(file_obj: Optional[gr.File]) -> Tuple[Any, Any, Any]:
+    """
+    Handles a file upload or clear event specifically for updating UI previews.
+    Returns update objects for image, audio, and video display components.
+    """
+    image_update = gr.update(value=None, visible=False)
+    audio_update = gr.update(value=None, visible=False)
+    video_update = gr.update(value=None, visible=False)
+
+    if file_obj is None:
+        # File was cleared by the user
+        return image_update, audio_update, video_update
+
+    temp_file_path = file_obj.name
+    file_name = os.path.basename(temp_file_path)
+    
+    # Process the file to determine its category and if it's valid media
+    # We use b64_data's presence to confirm if the media was successfully processed for preview.
+    b64_data, _, category, _ = process_uploaded_file(temp_file_path, file_name)
+
+    if category == "image" and b64_data:
+        image_update = gr.update(value=temp_file_path, visible=True)
+    elif category == "audio" and b64_data:
+        audio_update = gr.update(value=temp_file_path, visible=True)
+    elif category == "video" and b64_data:
+        video_update = gr.update(value=temp_file_path, visible=True)
+    # If category is 'file' or b64_data is None (processing failed for media),
+    # all previews remain hidden as per their initial update values.
+    
+    return image_update, audio_update, video_update
 
 # --- Gradio Interface Logic ---
 async def chat_fn(
@@ -119,14 +160,17 @@ async def chat_fn(
     file_obj: Optional[gr.File], # Gradio's File component output
     chat_history: List[dict[str, Optional[str]]],
     model_name: str  # Add model_name as input
-) -> AsyncGenerator[Tuple[str, Optional[gr.File], List[dict[str, Optional[str]]], List[dict[str, Optional[str]]]], None]:
-    # This function is an asynchronous generator because Gradio expects
-    # generators for streaming updates to the UI (e.g., clearing inputs,
-    # updating chat history).
-    # It yields tuples: (updated_text_input, updated_file_upload,
-    # updated_chatbot_display, updated_chat_history_state).
-    # The last two elements are the same list, used to update both the
-    # visual chatbot and the internal state.
+) -> AsyncGenerator[
+    Tuple[
+        str,  # text_input update
+        Optional[gr.File],  # file_upload update
+        List[dict[str, Optional[str]]],  # chatbot_display update
+        List[dict[str, Optional[str]]],  # chat_history_state update
+        Any,  # image_display update (gr.update object)
+        Any,  # audio_display update (gr.update object)
+        Any   # video_display update (gr.update object)
+    ], None
+]:
     """
     Handles the chat interaction.
     Processes user input (text and/or file), calls the LLM, and updates history.
@@ -134,9 +178,17 @@ async def chat_fn(
     # Ensure LLM handler is initialized
     if llm_handler_instance is None:
         error_message = "LLM Handler not initialized. Please check API key and configurations."
-        updated_history = chat_history + [{"role": "user", "content": user_message}, {"role": "assistant", "content": error_message}]
-        yield "", None, updated_history, updated_history
+        # Use a generic message if user_message is also empty (e.g. on file upload attempt with no text)
+        user_turn_content = user_message if user_message else "[File Upload Attempt]"
+        updated_history = chat_history + [{"role": "user", "content": user_turn_content}, {"role": "assistant", "content": error_message}]
+        # Yield initial (empty/hidden) states for media displays
+        yield "", None, updated_history, updated_history, gr.update(value=None, visible=False), gr.update(value=None, visible=False), gr.update(value=None, visible=False)
         return
+
+    # Initialize media display updates to hidden
+    image_update = gr.update(value=None, visible=False)
+    audio_update = gr.update(value=None, visible=False)
+    video_update = gr.update(value=None, visible=False)
 
     # Prepare inputs from user message and file
     (
@@ -144,9 +196,27 @@ async def chat_fn(
         base64_image_data, image_mime_type,
         base64_audio_data, audio_mime_type,
         base64_video_data, video_mime_type,
-        has_processed_media
+        has_processed_media,
+        media_category, # New from _prepare_inputs_for_llm
+        original_file_path # New from _prepare_inputs_for_llm
     ) = _prepare_inputs_for_llm(user_message, file_obj)
 
+    # Update media display components based on successfully processed uploaded file
+    if original_file_path: # A file was provided
+        if media_category == "image" and base64_image_data: # Successfully processed as image
+            image_update = gr.update(value=original_file_path, visible=True)
+            # Ensure other media types are hidden if an image is shown
+            audio_update = gr.update(value=None, visible=False)
+            video_update = gr.update(value=None, visible=False)
+        elif media_category == "audio" and base64_audio_data: # Successfully processed as audio
+            audio_update = gr.update(value=original_file_path, visible=True)
+            image_update = gr.update(value=None, visible=False)
+            video_update = gr.update(value=None, visible=False)
+        elif media_category == "video" and base64_video_data: # Successfully processed as video
+            video_update = gr.update(value=original_file_path, visible=True)
+            image_update = gr.update(value=None, visible=False)
+            audio_update = gr.update(value=None, visible=False)
+        # If not a displayable/processed media type, updates remain to hide/clear them.
     # Handle cases of no actual input for the LLM or display
     # display_prompt will be empty if user_message is empty AND no file was uploaded/processed
     if not display_prompt:
@@ -160,13 +230,13 @@ async def chat_fn(
             error_message = "Please provide new input or ask a question."
         # Do not add user message to history if it's empty
         chat_history.append({"role": "assistant", "content": error_message})
-        yield "", None, chat_history, chat_history
+        yield "", None, chat_history, chat_history, image_update, audio_update, video_update
         return
 
     # Append user's turn to chat history for display
     # display_prompt contains the file info message (if any) and the user's text.
     chat_history.append({"role": "user", "content": display_prompt})
-    yield "", None, chat_history, chat_history # Update UI with user's message
+    yield "", None, chat_history, chat_history, image_update, audio_update, video_update # Update UI with user's message & media
 
     # The actual call to the LLM handler happens here.
     # It's only called if there's user text or successfully processed media.
@@ -190,7 +260,7 @@ async def chat_fn(
         # but `has_processed_media` is False (e.g., PDF) AND `user_message` is empty.
         chat_history.append({"role": "assistant", "content": "I received the file information. How can I help you with it?"})
 
-    yield "", None, chat_history, chat_history # Update UI with AI's response
+    yield "", None, chat_history, chat_history, image_update, audio_update, video_update # Update UI with AI's response
 
 
 # --- Main Application Execution ---
