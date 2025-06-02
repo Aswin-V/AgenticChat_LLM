@@ -1,5 +1,6 @@
 # config.py
 # This file stores application-wide configuration settings.
+# It centralizes all hardcoded values, making them easy to manage and modify.
 
 from typing import List
 

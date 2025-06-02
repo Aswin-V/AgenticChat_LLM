@@ -1,12 +1,18 @@
+# llm_handler.py
+# This module is responsible for all interactions with the Large Language Model (LLM).
+# It encapsulates the logic for initializing the LLM client (e.g., Google Generative AI),
+# formatting chat history appropriately for the LLM, and generating responses,
+# including handling multimodal inputs like text, images, audio, and video.
+
 import os
 from dotenv import load_dotenv
-from PIL import Image
-from typing import List, Any, Optional, Tuple, Dict # Corrected 'dict' to 'Dict' for consistency if used, or use lowercase 'dict'
+from typing import List, Any, Optional, Dict # Use lowercase 'dict' for type hints
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Load environment variables from .env file
+# It's crucial for this to be called early, so os.getenv can access these variables.
 load_dotenv()
 
 class LLMHandler:
@@ -14,10 +20,20 @@ class LLMHandler:
     Handles interactions with the Large Language Model (LLM), including initialization,
     formatting chat history, and generating responses with multimodal inputs.
     """
-    def __init__(self, provider="google", model_name="gemini-pro-vision", google_api_key: Optional[str] = None):
+    def __init__(self, provider: str = "google", model_name: str = "gemini-pro-vision", google_api_key: Optional[str] = None):
+        """
+        Initializes the LLMHandler.
+
+        Args:
+            provider (str): The LLM provider (e.g., "google", "ollama", "openai").
+                            Currently, only "google" is fully implemented.
+            model_name (str): The specific model name to use from the provider.
+            google_api_key (Optional[str]): The Google API key. If None, it's fetched
+                                            from the GOOGLE_API_KEY environment variable.
+        """
         self.provider = provider
         self.model_name = model_name
-        self.google_api_key = google_api_key or os.getenv("GOOGLE_API_KEY")
+        self.google_api_key: Optional[str] = google_api_key or os.getenv("GOOGLE_API_KEY")
         
         if not self.google_api_key and self.provider == "google":
             raise ValueError("GOOGLE_API_KEY not found. Please set it in your .env file or pass it directly.")
@@ -25,7 +41,14 @@ class LLMHandler:
         self.llm = self._init_llm()
 
     def _init_llm(self):
-        """Initializes the LLM client based on the specified provider."""
+        """
+        Initializes the LLM client based on the specified provider and model.
+        
+        Returns:
+            An instance of the LLM client (e.g., ChatGoogleGenerativeAI).
+        Raises:
+            ValueError: If an unsupported LLM provider is specified.
+        """
         if self.provider == "google":
             return ChatGoogleGenerativeAI(
                 model=self.model_name,
@@ -40,10 +63,18 @@ class LLMHandler:
         else:
             raise ValueError(f"Unsupported LLM provider: {self.provider}")
 
-    def _format_chat_history_for_llm(self, chat_history: List[Dict[str, Any]]) -> List[Any]:
+    def _format_chat_history_for_llm(self, chat_history: List[dict[str, Any]]) -> List[Any]:
         """
         Converts Gradio's dictionary-based chat history format to Langchain's message objects.
-        Handles cases where content might be a string or a tuple (text, filepath) for UI display.
+        Gradio chat history is a list of dictionaries, where each dictionary has "role"
+        (user or assistant) and "content". The content from user messages might be
+        a tuple (text, filepath) if it included a file upload for UI display purposes,
+        or just a string. This function extracts the textual part for the LLM.
+
+        Args:
+            chat_history (List[dict[str, Any]]): The chat history in Gradio's format.
+        Returns:
+            List[Any]: A list of Langchain message objects (HumanMessage, AIMessage).
         """
         messages = []
         for msg_dict in chat_history:
@@ -51,9 +82,11 @@ class LLMHandler:
             content = msg_dict.get("content")
             
             actual_text_content: Optional[str] = None
-            if isinstance(content, tuple): # User message with image: (text, filepath)
+            # Gradio's chatbot component can store user messages with files as (text, filepath_or_url_tuple)
+            # We only need the text part for the LLM history.
+            if isinstance(content, tuple):
                 actual_text_content = content[0] if content[0] else "" # Use text part
-            elif isinstance(content, str): # Regular text message or assistant message
+            elif isinstance(content, str): # Regular text message or AI message
                 actual_text_content = content
 
             # Ensure actual_text_content is not None before creating a message.
@@ -73,12 +106,25 @@ class LLMHandler:
                                 audio_mime_type: Optional[str],
                                 base64_video_data: Optional[str],
                                 video_mime_type: Optional[str],
-                                chat_history: List[Dict[str, Optional[str]]]) -> str:
+                                chat_history: List[dict[str, Optional[str]]]) -> str:
         """
         Generates a response from the LLM based on text, optional media (image, audio, video),
         and chat history.
+
+        Args:
+            user_text (str): The text input from the user.
+            base64_image_data (Optional[str]): Base64 encoded image data.
+            image_mime_type (Optional[str]): MIME type of the image.
+            base64_audio_data (Optional[str]): Base64 encoded audio data.
+            audio_mime_type (Optional[str]): MIME type of the audio.
+            base64_video_data (Optional[str]): Base64 encoded video data.
+            video_mime_type (Optional[str]): MIME type of the video.
+            chat_history (List[dict[str, Optional[str]]]): The conversation history.
+
+        Returns:
+            str: The LLM's response as a string.
         """
-        llm_messages = self._format_chat_history_for_llm(chat_history)
+        llm_messages: List[Any] = self._format_chat_history_for_llm(chat_history)
         
         current_input_content = []
         # Add text part if present
@@ -88,9 +134,10 @@ class LLMHandler:
         # Add image part if present
         if base64_image_data and image_mime_type and self.provider == "google":
             data_uri = f"data:{image_mime_type};base64,{base64_image_data}"
-            # Correct format for images as per Langchain documentation for Google GenAI
+            # Format for multimodal input (image) for Google Generative AI models via Langchain
             current_input_content.append({"type": "image_url", "image_url": data_uri})
-        elif base64_image_data: # Fallback if MIME type is missing or for other providers
+        elif base64_image_data: 
+            # Fallback message if MIME type is missing or for providers not supporting direct image data
             current_input_content.append({"type": "text", "text": "[Image uploaded, but current LLM may not process it directly]"})
 
         # Add audio part if present
@@ -101,7 +148,7 @@ class LLMHandler:
                 "data": base64_audio_data,
                 "mime_type": audio_mime_type
             })
-        elif base64_audio_data:
+        elif base64_audio_data: # Fallback for audio
             current_input_content.append({"type": "text", "text": "[Audio uploaded, but current LLM may not process it directly]"})
 
         # Add video part if present
@@ -112,22 +159,29 @@ class LLMHandler:
                 "data": base64_video_data,
                 "mime_type": video_mime_type
             })
-        elif base64_video_data:
+        elif base64_video_data: # Fallback for video
             current_input_content.append({"type": "text", "text": "[Video uploaded, but current LLM may not process it directly]"})
 
-        # Ensure there's some content to send if no new user input but history exists
+        # Ensure there's some content to send.
+        # If current_input_content is empty (e.g., only history was passed and no new user input),
+        # an error might occur with the LLM.
         if not current_input_content:
              if not llm_messages: 
                 return "Please provide some input."
-             else: # Only history, no new input (should ideally be handled by UI not to call if no new content)
-                current_input_content.append({"type": "text", "text": "..."}) # Placeholder if only history
-
+             else: 
+                # This case (only history, no new input) should ideally be handled by the UI
+                # to prevent calling the LLM without new content.
+                # However, as a safeguard, send a minimal text.
+                current_input_content.append({"type": "text", "text": "..."})
+        
         llm_messages.append(HumanMessage(content=current_input_content))
         
         try:
+            # Asynchronously invoke the LLM with the prepared messages.
             ai_response_obj = await self.llm.ainvoke(llm_messages)
-            return ai_response_obj.content
+            return str(ai_response_obj.content) # Ensure content is string
         except Exception as e:
+            # Catch potential errors during LLM interaction and return a user-friendly message.
             print(f"Error invoking LLM: {e}")
             if "API key not valid" in str(e):
                 return "Error: The Google API key is not valid. Please check your .env file or API key settings."
@@ -137,6 +191,7 @@ class LLMHandler:
 
 if __name__ == "__main__":
     import asyncio
+    from PIL import Image # For dummy image creation in test
     import base64
     
     async def test_handler():

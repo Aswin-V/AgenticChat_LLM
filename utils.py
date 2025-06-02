@@ -1,14 +1,11 @@
 # utils.py
-# This file contains utility functions used across the application,
-# such as file processing, MIME type detection, base64 encoding,
-# and generating default prompts.
-
-import os
-from config import ( # Import default prompts from config
-    DEFAULT_PROMPT_IMAGE, DEFAULT_PROMPT_AUDIO, DEFAULT_PROMPT_VIDEO, DEFAULT_PROMPT_FILE
-)
+# This file contains common utility functions used across the application.
+# These functions provide support for tasks like file processing,
+# MIME type detection, and base64 encoding, abstracting these details
+# from the main application logic.
 
 from PIL import Image, UnidentifiedImageError
+import os # Import the os module
 import base64 # Used for encoding file data to base64 strings.
 from typing import Tuple, Optional
 
@@ -54,18 +51,7 @@ def encode_file_to_base64(file_path: str) -> Optional[str]:
         with open(file_path, "rb") as file_binary:
             return base64.b64encode(file_binary.read()).decode("utf-8")
     except Exception:
-        return None
-
-def get_default_prompt_for_media(media_type: str) -> str:
-    """Returns a default prompt based on the media type."""
-    # Provides a fallback text prompt if a user uploads media but no text query.
-    if media_type == "image":
-        return "Describe the uploaded image."
-    elif media_type == "audio":
-        return "Transcribe or summarize the uploaded audio."
-    elif media_type == "video":
-        return "Describe or summarize the uploaded video."
-    return "Describe the uploaded content."
+        return None # Return None if any error occurs during file reading or encoding.
 
 def process_uploaded_file(file_path: str, file_name: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
     """
